@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ChainPlays – Gameboy Frontend</title>
+  <!-- Ethers v5 UMD -->
+  <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+  <style>
+    :root{--bg:#0b0f14;--fg:#e6edf3;--muted:#96a1aa;--accent:#58a6ff;--card:#11161d;--ok:#2ea043;--err:#f85149}
+    body{margin:0;font:16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial;color:var(--fg);background:linear-gradient(180deg,#0b0f14,#0d1218)}
+    .wrap{max-width:760px;margin:32px auto;padding:24px}
+    .card{background:var(--card);border:1px solid #1f2630;border-radius:16px;box-shadow:0 10px 30px rgba(0,0,0,.35);padding:20px}
+    h1{font-size:22px;margin:0 0 16px}
+    p.small{color:var(--muted);margin-top:6px}
+    button{cursor:pointer;background:var(--accent);border:none;color:#081018;font-weight:700;padding:12px 16px;border-radius:12px;min-width:84px}
+    button.secondary{background:#202731;color:var(--fg);border:1px solid #2a3340}
+    input{width:100%;padding:12px 14px;border-radius:12px;border:1px solid #2a323d;background:#0f141b;color:var(--fg);outline:none}
+    input:focus{border-color:var(--accent)}
+    .actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:16px}
+    .status{margin-top:14px;padding:12px;border-radius:12px;background:#0f151c;border:1px solid #1f2732;color:var(--muted)}
+    .status.ok{color:#c9f7d1;border-color:#284d34;background:#0e1a13}
+    .status.err{color:#ffd6d6;border-color:#4b2727;background:#1a0e0e}
+    .grid{display:grid;grid-template-columns:repeat(4, minmax(84px,1fr));gap:12px;margin-top:8px}
+    .log{margin-top:18px;max-height:280px;overflow:auto;border:1px solid #1f2732;border-radius:12px;background:#0e141a}
+    .log table{width:100%;border-collapse:collapse}
+    .log th,.log td{padding:10px;border-bottom:1px solid #1b222c;font-size:14px}
+    .log th{text-align:left;color:var(--muted);position:sticky;top:0;background:#0f151c}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#1e2a38;color:#c9d8e8;border:1px solid #2a3646;font-size:12px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>ChainPlays – Gameboy Frontend</h1>
+      <p class="small">Press a button to send <code>move(cmd, memo)</code>. No storage—just events.</p>
+
+      <div class="actions">
+        <button id="btnConnect">Connect Wallet</button>
+        <button id="btnStatus" class="secondary">Status</button>
+        <button id="btnWatch" class="secondary">Watch events</button>
+      </div>
+
+      <label for="memo" style="display:block;margin-top:12px;color:#96a1aa">Memo (optional)</label>
+      <input id="memo" maxlength="128" placeholder="e.g. GG ez" />
+
+      <!-- Gameboy buttons -->
+      <div class="grid" id="gameboyButtons"></div>
+
+      <div id="status" class="status">Not connected.</div>
+
+      <div class="log" id="log" hidden>
+        <table>
+          <thead>
+            <tr><th>Block</th><th>Sender</th><th>Cmd</th><th>Weight</th><th>Memo</th></tr>
+          </thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+<script>
+(function(){
+  // Ethers (UMD) lives on window.ethers
+  const ethers = window.ethers;
+
+  // Hard-coded contract address
+  const CONTRACT_ADDR = "0x7c8A35C98Bf46a67324Af3F54aD027DBE2138E98";
+
+  // Minimal ABI (function + event)
+  const ABI = [
+    "function move(uint8 cmd, string memo)",
+    "event Move(address indexed sender, uint8 cmd, uint256 weight, string memo)"
+  ];
+
+  // Command mapping
+  const CMD = {
+    0: "Up",
+    1: "Down",
+    2: "Left",
+    3: "Right",
+    4: "A",
+    5: "B",
+    6: "Start",
+    7: "Select",
+  };
+
+  // DOM
+  const $ = (id)=>document.getElementById(id);
+  const statusEl = $("status");
+  const memoEl   = $("memo");
+  const logEl    = $("log");
+  const tbody    = $("tbody");
+
+  let provider, signer;
+
+  function say(msg, cls){
+    statusEl.className = "status" + (cls ? " " + cls : "");
+    statusEl.textContent = msg;
+  }
+
+  async function ensureWallet(){
+    if(!window.ethereum){
+      say("No wallet found. Install MetaMask/Rabby.", "err");
+      throw new Error("no-wallet");
+    }
+    if(!provider){ provider = new ethers.providers.Web3Provider(window.ethereum); }
+    const accounts = await provider.listAccounts();
+    if(accounts.length === 0){
+      await provider.send("eth_requestAccounts", []);
+    }
+    signer = provider.getSigner();
+    const a = await signer.getAddress();
+    const n = await provider.getNetwork();
+    say(`Connected: ${a.slice(0,6)}…${a.slice(-4)} on chain ${n.chainId}`, "ok");
+    return { a, n };
+  }
+
+  function getContract(){
+    return new ethers.Contract(CONTRACT_ADDR, ABI, signer || provider);
+  }
+
+  async function sendMove(cmdIndex){
+    try{
+      await ensureWallet();
+      const c = getContract();
+      const memo = memoEl.value || "";
+      const tx = await c.connect(signer).move(cmdIndex, memo);
+      say(`Sent: ${tx.hash}. Waiting for 1 confirmation…`);
+      const rcpt = await tx.wait(1);
+      say(`Confirmed in block ${rcpt.blockNumber}. Tx: ${tx.hash}`, "ok");
+    }catch(e){
+      console.error(e);
+      say(e?.error?.message || e?.data?.message || e.message || String(e), "err");
+    }
+  }
+
+  function setupButtons(){
+    const container = $("gameboyButtons");
+    // nice order: D-pad, A/B, Start/Select
+    const order = [0,1,2,3,4,5,6,7];
+    order.forEach((i)=>{
+      const btn = document.createElement("button");
+      btn.textContent = CMD[i];
+      btn.onclick = ()=>sendMove(i);
+      container.appendChild(btn);
+    });
+  }
+
+  $("btnConnect").onclick = ensureWallet;
+  $("btnStatus").onclick = async()=>{ try{ await ensureWallet(); }catch(e){ say(e.message, "err"); } };
+
+  $("btnWatch").onclick = async()=>{
+    try{
+      await ensureWallet();
+      const c = getContract();
+      logEl.hidden = false;
+      tbody.innerHTML = "";
+
+      // Backfill recent events then stream new ones
+      const latest = await provider.getBlockNumber();
+      const fromBlock = Math.max(latest - 200, 0);
+      const filter = c.filters.Move();
+
+      const past = await c.queryFilter(filter, fromBlock, latest);
+      past.forEach(addRow);
+
+      c.on(filter, (sender, cmd, weight, memo, evt)=>{
+        addRow({ args:{ sender, cmd, weight, memo }, blockNumber: evt.blockNumber });
+      });
+
+      say(`Watching Move events from block ${fromBlock} → live…`, "ok");
+    }catch(e){
+      say(e.message || String(e), "err");
+    }
+  };
+
+  function addRow(log){
+    const tr = document.createElement("tr");
+    const { sender, cmd, weight, memo } = log.args;
+    const cmdNum = Number(cmd.toString ? cmd.toString() : cmd);
+    tr.innerHTML = `
+      <td><span class="pill">#${log.blockNumber}</span></td>
+      <td>${sender.slice(0,6)}…${sender.slice(-4)}</td>
+      <td>${CMD[cmdNum] ?? cmdNum}</td>
+      <td>${weight.toString?.() ?? weight}</td>
+      <td>${escapeHtml(String(memo))}</td>`;
+    tbody.prepend(tr);
+  }
+
+  function escapeHtml(s){
+    return s.replace(/[&<>\"']/g, (c)=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+  }
+
+  setupButtons();
+})();
+</script>
+</body>
+</html>
